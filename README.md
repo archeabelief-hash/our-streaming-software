@@ -4,74 +4,56 @@ A local, visual-only Windows overlay for improving on-screen visibility while ga
 
 ## ONE-CLICK WINDOWS INSTALL
 
-Download the repository and double-click:
+Download/extract the repository, then double-click:
 
-`ONE_CLICK_INSTALL.bat`
+`SAFE_ONE_CLICK_INSTALL.bat`
 
-That single file will automatically:
+This version deliberately avoids PowerShell `ExecutionPolicy Bypass` and does not disable or modify Windows Defender.
 
-1. Check for Python 3.11.
-2. Install Python 3.11 with Windows Package Manager if it is missing.
-3. Create the private `.venv` environment.
-4. Install NumPy first to prevent the common missing-NumPy error.
-5. Install RF-DETR, ByteTrack/Trackers, PySide6, screen capture, and the remaining dependencies.
-6. Create a desktop shortcut named **Universal Visual Tracker Overlay**.
-7. Launch the program when setup finishes.
+It automatically:
 
-After the first installation, just use the desktop shortcut or double-click:
+1. Checks for Python 3.11.
+2. Uses Windows Package Manager (`winget`) to install Python 3.11 if needed.
+3. Creates a private `.venv` environment inside the folder.
+4. Installs NumPy.
+5. Installs RF-DETR, Trackers/ByteTrack, PySide6, screen capture, and other dependencies.
+6. Launches the tracker.
+
+After installation, use:
 
 `START_TRACKER.bat`
 
-## What it does
+## Security
 
-- Select almost any visible Windows application from a dropdown.
-- Capture the visible client area of that application.
-- Detect standard COCO objects locally using RF-DETR Nano.
-- Track detected objects across frames using ByteTrack.
-- Draw a transparent, click-through overlay with boxes, class labels, confidence, and persistent tracking IDs.
-- Optionally filter to specific classes such as `person`, `car`, `dog`, etc.
-- Leaves mouse and keyboard input alone.
+The installer does **not**:
+- disable Microsoft Defender;
+- add antivirus exclusions;
+- use PowerShell ExecutionPolicy bypass;
+- modify another process;
+- inject code into games;
+- read game memory;
+- download arbitrary executables from unknown sites.
+
+Python is installed through Microsoft's `winget` package source, and Python dependencies are installed through `pip`.
+
+If your antivirus still reports a malware detection, do **not** override it. Record the exact threat name and the exact file Defender says is infected so it can be investigated.
+
+## What the tracker does
+
+- Select a visible Windows application.
+- Capture the visible client area.
+- Detect standard COCO objects locally with RF-DETR Nano.
+- Track detections across frames with ByteTrack.
+- Draw transparent click-through boxes and labels.
+- Leave mouse and keyboard input alone.
 
 ## What it does not do
 
-- No mouse movement or aim control.
-- No automated key presses.
-- No game-process memory reading.
-- No hidden or through-wall object detection.
-- No control over the selected application.
-
-## Requirements
-
-- Windows 10 or Windows 11
-- Internet connection for the first installation and initial model download
-- Windows Package Manager (`winget`) if Python 3.11 is not already installed
-
-Most current Windows 10/11 systems already include `winget` through Microsoft's **App Installer** package.
-
-## Performance
-
-RF-DETR Nano is used because it is the smallest current Apache-2.0 RF-DETR detector.
-
-For better speed:
-- use 10-20 processing FPS on slower systems;
-- reduce the game's window resolution;
-- filter to only the classes you need;
-- use CUDA-enabled PyTorch on a supported NVIDIA GPU.
-
-## Game-specific detection
-
-The stock RF-DETR model understands standard COCO objects such as people, cars, animals, bottles, backpacks, chairs, and monitors.
-
-It does not automatically understand game-specific concepts such as:
-- enemy
-- teammate
-- loot
-- boss
-- ore
-- quest NPC
-- dropped weapon
-
-Those require a detector trained or fine-tuned on screenshots from the specific game.
+- No aim control.
+- No automated input.
+- No game memory reading.
+- No hidden/through-wall detection.
+- No process injection.
 
 ## Core projects
 
