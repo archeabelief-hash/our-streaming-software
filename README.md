@@ -6,7 +6,7 @@ A local, visual-only Windows overlay for improving on-screen visibility while ga
 
 Download/extract the repository, then double-click:
 
-`SAFE_ONE_CLICK_INSTALL.bat`
+`INSTALL.bat`
 
 This installer avoids PowerShell ExecutionPolicy bypasses and does not disable or modify Windows Defender.
 
@@ -23,7 +23,7 @@ After installation, use:
 
 `START_TRACKER.bat`
 
-If you already installed an older version, run `SAFE_ONE_CLICK_INSTALL.bat` again once so it installs the new `dxcam` dependency.
+If you already installed an older version, run `INSTALL.bat` again once so it installs the new `dxcam` dependency.
 
 ## Real-time modes
 
