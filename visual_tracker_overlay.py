@@ -7,7 +7,6 @@ import cv2
 import mss
 import numpy as np
 import win32gui
-from PIL import Image
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -21,8 +20,11 @@ from rfdetr import RFDETRNano
 from rfdetr.assets.coco_classes import COCO_CLASSES
 from trackers import ByteTrackTracker
 
+try:
+    import dxcam
+except Exception:
+    dxcam = None
 
-# Make Win32 coordinates match physical pixels on scaled displays.
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -43,6 +45,13 @@ class TrackBox:
     track_id: int | None
 
 
+def get_client_screen_rect(hwnd):
+    l, t, r, b = win32gui.GetClientRect(hwnd)
+    l, t = win32gui.ClientToScreen(hwnd, (l, t))
+    r, b = win32gui.ClientToScreen(hwnd, (r, b))
+    return l, t, r, b
+
+
 def visible_windows():
     items = []
 
@@ -53,26 +62,17 @@ def visible_windows():
         if not title:
             return
         try:
-            left, top, right, bottom = get_client_screen_rect(hwnd)
+            l, t, r, b = get_client_screen_rect(hwnd)
+            if r - l >= 80 and b - t >= 80:
+                items.append((title, hwnd))
         except Exception:
-            return
-        if right - left < 80 or bottom - top < 80:
-            return
-        items.append((title, hwnd))
+            pass
 
     win32gui.EnumWindows(callback, None)
-    items.sort(key=lambda x: x[0].lower())
-    return items
+    return sorted(items, key=lambda x: x[0].lower())
 
 
-def get_client_screen_rect(hwnd):
-    left, top, right, bottom = win32gui.GetClientRect(hwnd)
-    screen_left, screen_top = win32gui.ClientToScreen(hwnd, (left, top))
-    screen_right, screen_bottom = win32gui.ClientToScreen(hwnd, (right, bottom))
-    return screen_left, screen_top, screen_right, screen_bottom
-
-
-def coco_name(class_id: int) -> str:
+def coco_name(class_id):
     if isinstance(COCO_CLASSES, dict):
         return str(COCO_CLASSES.get(class_id, class_id))
     if 0 <= class_id < len(COCO_CLASSES):
@@ -80,12 +80,78 @@ def coco_name(class_id: int) -> str:
     return str(class_id)
 
 
+def offset_detections(det, xoff, yoff):
+    if det is None or len(det) == 0:
+        return sv.Detections.empty()
+    det.xyxy = det.xyxy.astype(np.float32, copy=True)
+    det.xyxy[:, [0, 2]] += xoff
+    det.xyxy[:, [1, 3]] += yoff
+    return det
+
+
+def merge_detections(items):
+    valid = [d for d in items if d is not None and len(d) > 0]
+    if not valid:
+        return sv.Detections.empty()
+
+    xyxy = np.concatenate([d.xyxy for d in valid], axis=0)
+    conf_parts = []
+    cls_parts = []
+    for d in valid:
+        conf_parts.append(
+            d.confidence if d.confidence is not None else np.ones(len(d), dtype=np.float32)
+        )
+        cls_parts.append(
+            d.class_id if d.class_id is not None else np.full(len(d), -1, dtype=int)
+        )
+    return sv.Detections(
+        xyxy=xyxy,
+        confidence=np.concatenate(conf_parts),
+        class_id=np.concatenate(cls_parts),
+    )
+
+
+def classwise_nms(det, iou_threshold=0.55):
+    if det is None or len(det) <= 1:
+        return det
+
+    boxes = det.xyxy.astype(np.float32)
+    scores = det.confidence if det.confidence is not None else np.ones(len(det))
+    classes = det.class_id if det.class_id is not None else np.zeros(len(det), dtype=int)
+
+    keep = []
+    for cls in np.unique(classes):
+        idxs = np.where(classes == cls)[0]
+        order = idxs[np.argsort(scores[idxs])[::-1]]
+
+        while len(order):
+            i = order[0]
+            keep.append(i)
+            if len(order) == 1:
+                break
+
+            rest = order[1:]
+            xx1 = np.maximum(boxes[i, 0], boxes[rest, 0])
+            yy1 = np.maximum(boxes[i, 1], boxes[rest, 1])
+            xx2 = np.minimum(boxes[i, 2], boxes[rest, 2])
+            yy2 = np.minimum(boxes[i, 3], boxes[rest, 3])
+
+            inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+            area_i = (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1])
+            area_r = (boxes[rest, 2] - boxes[rest, 0]) * (boxes[rest, 3] - boxes[rest, 1])
+            iou = inter / np.maximum(area_i + area_r - inter, 1e-6)
+            order = rest[iou < iou_threshold]
+
+    keep = np.array(sorted(keep), dtype=int)
+    return det[keep]
+
+
 class Overlay(QWidget):
     def __init__(self):
         super().__init__()
-        self.boxes: list[TrackBox] = []
+        self.boxes = []
         self.show_ids = True
-        self.show_conf = True
+        self.show_conf = False
         self.line_width = 3
         self.setWindowFlags(
             Qt.FramelessWindowHint |
@@ -97,20 +163,13 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.hide()
 
-    def set_target_rect(self, rect):
-        left, top, right, bottom = rect
-        self.setGeometry(left, top, max(1, right - left), max(1, bottom - top))
-
     def update_tracks(self, boxes, rect):
         self.boxes = boxes
-        self.set_target_rect(rect)
+        l, t, r, b = rect
+        self.setGeometry(l, t, max(1, r-l), max(1, b-t))
         if not self.isVisible():
             self.show()
         self.raise_()
-        self.update()
-
-    def clear_tracks(self):
-        self.boxes = []
         self.update()
 
     def paintEvent(self, event):
@@ -121,16 +180,16 @@ class Overlay(QWidget):
         painter.setFont(font)
 
         for box in self.boxes:
-            # High-visibility green with a dark shadow edge.
+            x, y = int(box.x1), int(box.y1)
+            w, h = int(box.x2-box.x1), int(box.y2-box.y1)
+
             painter.setPen(QPen(QColor(0, 0, 0, 220), self.line_width + 2))
-            painter.drawRect(int(box.x1), int(box.y1),
-                             int(box.x2 - box.x1), int(box.y2 - box.y1))
+            painter.drawRect(x, y, w, h)
             painter.setPen(QPen(QColor(57, 255, 20, 255), self.line_width))
-            painter.drawRect(int(box.x1), int(box.y1),
-                             int(box.x2 - box.x1), int(box.y2 - box.y1))
+            painter.drawRect(x, y, w, h)
 
             parts = [box.label]
-            if self.show_ids and box.track_id is not None:
+            if self.show_ids and box.track_id is not None and box.track_id >= 0:
                 parts.append(f"#{box.track_id}")
             if self.show_conf:
                 parts.append(f"{box.confidence:.0%}")
@@ -139,127 +198,190 @@ class Overlay(QWidget):
             metrics = painter.fontMetrics()
             tw = metrics.horizontalAdvance(text) + 10
             th = metrics.height() + 6
-            tx = int(box.x1)
-            ty = max(0, int(box.y1) - th)
-
-            painter.fillRect(tx, ty, tw, th, QColor(0, 0, 0, 190))
+            ty = max(0, y - th)
+            painter.fillRect(x, ty, tw, th, QColor(0, 0, 0, 190))
             painter.setPen(QColor(255, 255, 255))
-            painter.drawText(tx + 5, ty + metrics.ascent() + 3, text)
+            painter.drawText(x + 5, ty + metrics.ascent() + 3, text)
 
 
 class CaptureWorker(QObject):
-    tracks_ready = Signal(object, object, float)
+    tracks_ready = Signal(object, object, float, str)
     status = Signal(str)
     finished = Signal()
 
-    def __init__(self, hwnd, threshold, class_filter, max_fps):
+    def __init__(self, hwnd, threshold, class_filter, max_fps, mode):
         super().__init__()
         self.hwnd = hwnd
         self.threshold = threshold
         self.class_filter = {x.strip().lower() for x in class_filter.split(",") if x.strip()}
         self.max_fps = max(1, int(max_fps))
+        self.mode = mode
         self.running = True
 
     def stop(self):
         self.running = False
 
-    def run(self):
-        try:
-            self.status.emit("Loading RF-DETR Nano locally...")
-            model = RFDETRNano()
-            tracker = ByteTrackTracker()
-            self.status.emit("Tracking started.")
+    def detect(self, model, rgb):
+        return model.predict(rgb, threshold=self.threshold)
 
+    def filter_classes(self, detections):
+        if self.class_filter and len(detections) > 0:
+            mask = np.array([
+                coco_name(int(cid)).lower() in self.class_filter
+                for cid in detections.class_id
+            ], dtype=bool)
+            return detections[mask]
+        return detections
+
+    def zoom_tile(self, frame, tile_index):
+        h, w = frame.shape[:2]
+        overlap = 0.10
+        tw = int(w * 0.55)
+        th = int(h * 0.55)
+
+        positions = [
+            (0, 0),
+            (max(0, w - tw), 0),
+            (0, max(0, h - th)),
+            (max(0, w - tw), max(0, h - th)),
+        ]
+        x0, y0 = positions[tile_index % 4]
+        x1, y1 = min(w, x0 + tw), min(h, y0 + th)
+        return frame[y0:y1, x0:x1], x0, y0
+
+    def run(self):
+        camera = None
+        sct = None
+        try:
+            self.status.emit("Loading RF-DETR Nano...")
+            model = RFDETRNano()
+
+            # Fast acquisition: confirm a track on its first valid frame and permit
+            # lower-confidence distant/small detections to establish tracks.
+            tracker = ByteTrackTracker(
+                track_activation_threshold=max(0.15, self.threshold),
+                high_conf_det_threshold=max(0.15, self.threshold),
+                minimum_consecutive_frames=1,
+                lost_track_buffer=30,
+                frame_rate=float(self.max_fps),
+            )
+
+            capture_name = "MSS"
+            if dxcam is not None:
+                try:
+                    camera = dxcam.create(output_color="RGB")
+                    capture_name = "DXGI"
+                except Exception:
+                    camera = None
+
+            if camera is None:
+                sct = mss.mss()
+
+            self.status.emit(f"Tracking started | {capture_name} capture")
             frame_period = 1.0 / self.max_fps
             last_report = time.perf_counter()
             frames = 0
             fps = 0.0
+            frame_index = 0
 
-            with mss.mss() as sct:
-                while self.running:
-                    loop_start = time.perf_counter()
+            while self.running:
+                loop_start = time.perf_counter()
 
-                    if not win32gui.IsWindow(self.hwnd):
-                        self.status.emit("Target window was closed.")
-                        break
+                if not win32gui.IsWindow(self.hwnd):
+                    self.status.emit("Target window closed.")
+                    break
 
-                    try:
-                        rect = get_client_screen_rect(self.hwnd)
-                    except Exception:
-                        time.sleep(0.05)
+                try:
+                    rect = get_client_screen_rect(self.hwnd)
+                except Exception:
+                    time.sleep(0.02)
+                    continue
+
+                left, top, right, bottom = rect
+                width, height = right-left, bottom-top
+                if width <= 1 or height <= 1 or win32gui.IsIconic(self.hwnd):
+                    time.sleep(0.05)
+                    continue
+
+                if camera is not None:
+                    rgb = camera.grab(region=(left, top, right, bottom))
+                    if rgb is None:
+                        time.sleep(0.001)
                         continue
-
-                    left, top, right, bottom = rect
-                    width = right - left
-                    height = bottom - top
-                    if width <= 1 or height <= 1 or win32gui.IsIconic(self.hwnd):
-                        time.sleep(0.1)
-                        continue
-
+                else:
                     raw = np.asarray(sct.grab({
-                        "left": left,
-                        "top": top,
-                        "width": width,
-                        "height": height
+                        "left": left, "top": top,
+                        "width": width, "height": height
                     }))
-
-                    # mss returns BGRA. RF-DETR receives RGB PIL input.
                     rgb = cv2.cvtColor(raw, cv2.COLOR_BGRA2RGB)
-                    image = Image.fromarray(rgb)
 
-                    detections = model.predict(image, threshold=self.threshold)
+                passes = []
 
-                    if self.class_filter and len(detections) > 0:
-                        mask = np.array([
-                            coco_name(int(cid)).lower() in self.class_filter
-                            for cid in detections.class_id
-                        ], dtype=bool)
-                        detections = detections[mask]
+                # Full-frame pass provides immediate acquisition anywhere on screen.
+                passes.append(self.detect(model, rgb))
 
-                    if len(detections) > 0:
-                        tracked = tracker.update(detections)
-                    else:
-                        # Keep tracker state advancing when no detections are visible.
-                        tracked = tracker.update(sv.Detections.empty())
+                # A rotating zoomed crop makes small/far visible objects much larger
+                # to the detector while limiting each frame to one extra inference.
+                do_zoom = (
+                    self.mode == "Long Range" or
+                    (self.mode == "Balanced" and frame_index % 2 == 0)
+                )
+                if do_zoom:
+                    tile, xoff, yoff = self.zoom_tile(rgb, frame_index)
+                    tile_det = self.detect(model, tile)
+                    passes.append(offset_detections(tile_det, xoff, yoff))
 
-                    boxes = []
-                    if len(tracked) > 0:
-                        ids = tracked.tracker_id
-                        for i, xyxy in enumerate(tracked.xyxy):
-                            cid = int(tracked.class_id[i]) if tracked.class_id is not None else -1
-                            conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.0
-                            tid = int(ids[i]) if ids is not None and ids[i] is not None else None
-                            boxes.append(TrackBox(
-                                float(xyxy[0]), float(xyxy[1]),
-                                float(xyxy[2]), float(xyxy[3]),
-                                coco_name(cid), conf, tid
-                            ))
+                detections = classwise_nms(merge_detections(passes), 0.55)
+                detections = self.filter_classes(detections)
 
-                    frames += 1
-                    now = time.perf_counter()
-                    if now - last_report >= 1.0:
-                        fps = frames / (now - last_report)
-                        frames = 0
-                        last_report = now
+                now = time.perf_counter()
+                tracked = tracker.update(
+                    detections if len(detections) else sv.Detections.empty(),
+                    timestamp=now
+                )
 
-                    self.tracks_ready.emit(boxes, rect, fps)
+                boxes = []
+                if len(tracked) > 0:
+                    ids = tracked.tracker_id
+                    for i, xyxy in enumerate(tracked.xyxy):
+                        cid = int(tracked.class_id[i]) if tracked.class_id is not None else -1
+                        conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.0
+                        tid = int(ids[i]) if ids is not None and ids[i] is not None else None
+                        boxes.append(TrackBox(
+                            float(xyxy[0]), float(xyxy[1]),
+                            float(xyxy[2]), float(xyxy[3]),
+                            coco_name(cid), conf, tid
+                        ))
 
-                    elapsed = time.perf_counter() - loop_start
-                    delay = frame_period - elapsed
-                    if delay > 0:
-                        time.sleep(delay)
+                frames += 1
+                frame_index += 1
+                if now - last_report >= 1.0:
+                    fps = frames / (now - last_report)
+                    frames = 0
+                    last_report = now
+
+                self.tracks_ready.emit(boxes, rect, fps, capture_name)
+
+                delay = frame_period - (time.perf_counter() - loop_start)
+                if delay > 0:
+                    time.sleep(delay)
 
         except Exception as exc:
             self.status.emit(f"ERROR: {type(exc).__name__}: {exc}")
         finally:
+            if sct is not None:
+                try:
+                    sct.close()
+                except Exception:
+                    pass
             self.finished.emit()
 
 
 class ControlPanel(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Universal Visual Tracker Overlay")
-        self.resize(520, 320)
+        self.setWindowTitle("Universal Visual Tracker Overlay - Low Latency")
+        self.resize(560, 390)
 
         self.overlay = Overlay()
         self.thread = None
@@ -271,16 +393,15 @@ class ControlPanel(QMainWindow):
         root = QVBoxLayout(central)
 
         intro = QLabel(
-            "Pick any visible Windows program. The app captures only what is visible "
-            "on screen, detects objects locally, tracks them, and draws a click-through overlay."
+            "Low-latency local visual tracking. Long Range mode adds one rotating "
+            "zoom pass per frame to improve acquisition of smaller, farther visible objects."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
 
         form = QFormLayout()
-        self.window_combo = QComboBox()
-        self.refresh_windows()
 
+        self.window_combo = QComboBox()
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.refresh_windows)
         row = QHBoxLayout()
@@ -288,38 +409,42 @@ class ControlPanel(QMainWindow):
         row.addWidget(refresh)
         form.addRow("Target program:", row)
 
+        self.mode = QComboBox()
+        self.mode.addItems(["Fast", "Balanced", "Long Range"])
+        self.mode.setCurrentText("Long Range")
+        form.addRow("Tracking mode:", self.mode)
+
         self.threshold = QDoubleSpinBox()
-        self.threshold.setRange(0.05, 0.95)
+        self.threshold.setRange(0.10, 0.90)
         self.threshold.setSingleStep(0.05)
-        self.threshold.setValue(0.45)
-        form.addRow("Detection confidence:", self.threshold)
+        self.threshold.setValue(0.25)
+        form.addRow("Acquisition confidence:", self.threshold)
 
         self.classes = QLineEdit()
-        self.classes.setPlaceholderText("blank = all COCO classes; example: person, car")
+        self.classes.setPlaceholderText("blank = all classes; e.g. person")
         form.addRow("Only show classes:", self.classes)
 
         self.max_fps = QSpinBox()
-        self.max_fps.setRange(1, 60)
-        self.max_fps.setValue(30)
-        form.addRow("Max processing FPS:", self.max_fps)
+        self.max_fps.setRange(1, 120)
+        self.max_fps.setValue(60)
+        form.addRow("Target processing FPS:", self.max_fps)
 
-        self.show_ids = QCheckBox("Show persistent track IDs")
+        self.show_ids = QCheckBox("Show track IDs")
         self.show_ids.setChecked(True)
         self.show_ids.toggled.connect(lambda v: setattr(self.overlay, "show_ids", v))
 
         self.show_conf = QCheckBox("Show confidence")
-        self.show_conf.setChecked(True)
+        self.show_conf.setChecked(False)
         self.show_conf.toggled.connect(lambda v: setattr(self.overlay, "show_conf", v))
 
-        checks = QHBoxLayout()
-        checks.addWidget(self.show_ids)
-        checks.addWidget(self.show_conf)
-        form.addRow("Overlay labels:", checks)
-
+        opts = QHBoxLayout()
+        opts.addWidget(self.show_ids)
+        opts.addWidget(self.show_conf)
+        form.addRow("Display:", opts)
         root.addLayout(form)
 
         controls = QHBoxLayout()
-        self.start_btn = QPushButton("START VISUAL TRACKING")
+        self.start_btn = QPushButton("START REAL-TIME TRACKING")
         self.stop_btn = QPushButton("STOP")
         self.stop_btn.setEnabled(False)
         self.start_btn.clicked.connect(self.start_tracking)
@@ -333,21 +458,22 @@ class ControlPanel(QMainWindow):
         root.addWidget(self.status_label)
 
         note = QLabel(
-            "Visual-only: this program does not read game memory, reveal occluded objects, "
-            "move the mouse, press keys, or control another application."
+            "Fast = lowest latency. Balanced = zoom scan every other frame. "
+            "Long Range = full-frame + zoom scan every frame. Detection remains visual-only."
         )
         note.setWordWrap(True)
         root.addWidget(note)
 
+        self.refresh_windows()
+
     def refresh_windows(self):
-        previous_hwnd = self.current_hwnd()
+        previous = self.current_hwnd()
         self.windows = visible_windows()
         self.window_combo.clear()
-
         selected = 0
         for i, (title, hwnd) in enumerate(self.windows):
             self.window_combo.addItem(f"{title}  [HWND {hwnd}]")
-            if hwnd == previous_hwnd:
+            if hwnd == previous:
                 selected = i
         if self.windows:
             self.window_combo.setCurrentIndex(selected)
@@ -371,7 +497,8 @@ class ControlPanel(QMainWindow):
             hwnd=hwnd,
             threshold=float(self.threshold.value()),
             class_filter=self.classes.text(),
-            max_fps=int(self.max_fps.value())
+            max_fps=int(self.max_fps.value()),
+            mode=self.mode.currentText(),
         )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -389,13 +516,14 @@ class ControlPanel(QMainWindow):
             self.worker.stop()
         if wait and self.thread is not None and self.thread.isRunning():
             self.thread.quit()
-            self.thread.wait(1000)
+            self.thread.wait(1500)
         self.overlay.hide()
 
-    def on_tracks(self, boxes, rect, fps):
+    def on_tracks(self, boxes, rect, fps, capture_name):
         self.overlay.update_tracks(boxes, rect)
         self.status_label.setText(
-            f"Tracking {len(boxes)} object(s) | processing {fps:.1f} FPS"
+            f"{self.mode.currentText()} | {capture_name} | "
+            f"{len(boxes)} tracked | {fps:.1f} processing FPS"
         )
 
     def on_finished(self):
