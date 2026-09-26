@@ -1,57 +1,79 @@
 # Universal Visual Tracker Overlay
 
-A **local, visual-only Windows overlay** for improving on-screen visibility while gaming, watching footage, or using other desktop applications.
+A local, visual-only Windows overlay for improving on-screen visibility while gaming or using other desktop applications.
 
-It captures the visible client area of a selected window, runs **RF-DETR Nano** object detection locally, feeds detections into **Roboflow Trackers / ByteTrack**, and draws transparent click-through boxes above the selected program.
+## ONE-CLICK WINDOWS INSTALL
+
+Download the repository and double-click:
+
+`ONE_CLICK_INSTALL.bat`
+
+That single file will automatically:
+
+1. Check for Python 3.11.
+2. Install Python 3.11 with Windows Package Manager if it is missing.
+3. Create the private `.venv` environment.
+4. Install NumPy first to prevent the common missing-NumPy error.
+5. Install RF-DETR, ByteTrack/Trackers, PySide6, screen capture, and the remaining dependencies.
+6. Create a desktop shortcut named **Universal Visual Tracker Overlay**.
+7. Launch the program when setup finishes.
+
+After the first installation, just use the desktop shortcut or double-click:
+
+`START_TRACKER.bat`
 
 ## What it does
 
 - Select almost any visible Windows application from a dropdown.
-- Capture the application's visible client area.
-- Detect standard COCO objects locally with RF-DETR Nano.
-- Track detections across frames with ByteTrack.
-- Draw a transparent always-on-top overlay with bounding boxes, class names, confidence, and persistent track IDs.
-- Optionally filter to classes such as `person`, `car`, `dog`, etc.
+- Capture the visible client area of that application.
+- Detect standard COCO objects locally using RF-DETR Nano.
+- Track detected objects across frames using ByteTrack.
+- Draw a transparent, click-through overlay with boxes, class labels, confidence, and persistent tracking IDs.
+- Optionally filter to specific classes such as `person`, `car`, `dog`, etc.
 - Leaves mouse and keyboard input alone.
 
-## What it deliberately does not do
+## What it does not do
 
 - No mouse movement or aim control.
-- No key presses.
-- No reading another process's memory.
-- No hidden/occluded-object or through-wall detection.
-- No network inference required after model assets are downloaded.
+- No automated key presses.
+- No game-process memory reading.
+- No hidden or through-wall object detection.
+- No control over the selected application.
 
-## Windows install
+## Requirements
 
-1. Install **Python 3.11 64-bit**.
-2. Download or clone this repository.
-3. Double-click `install_windows.bat`.
-4. Double-click `run_overlay.bat`.
-5. Pick the program/window you want.
-6. Click **START VISUAL TRACKING**.
+- Windows 10 or Windows 11
+- Internet connection for the first installation and initial model download
+- Windows Package Manager (`winget`) if Python 3.11 is not already installed
 
-The installer explicitly installs NumPy first to avoid the common `No module named 'numpy'` error. The first RF-DETR run may download model weights.
+Most current Windows 10/11 systems already include `winget` through Microsoft's **App Installer** package.
 
 ## Performance
 
-RF-DETR Nano is used because it is the smallest current Apache-2.0 RF-DETR detector. Actual FPS depends heavily on GPU, resolution, and PyTorch acceleration.
+RF-DETR Nano is used because it is the smallest current Apache-2.0 RF-DETR detector.
 
-If performance is poor:
-- set processing FPS to 10-20;
-- reduce the target program's window size;
-- use a CUDA-enabled PyTorch build if you have a supported NVIDIA GPU;
-- filter to the classes you actually want to see.
+For better speed:
+- use 10-20 processing FPS on slower systems;
+- reduce the game's window resolution;
+- filter to only the classes you need;
+- use CUDA-enabled PyTorch on a supported NVIDIA GPU.
 
-## Important limitation
+## Game-specific detection
 
-The stock RF-DETR model is trained on the COCO object classes. It can identify things like people, cars, bicycles, animals, bags, bottles, chairs, monitors, etc., but it does **not automatically know game-specific concepts** like "enemy player", "loot", "boss", "ore", or "quest NPC".
+The stock RF-DETR model understands standard COCO objects such as people, cars, animals, bottles, backpacks, chairs, and monitors.
 
-For those, the architecture is already suitable, but you need a custom/fine-tuned detector trained on screenshots from the target game.
+It does not automatically understand game-specific concepts such as:
+- enemy
+- teammate
+- loot
+- boss
+- ore
+- quest NPC
+- dropped weapon
+
+Those require a detector trained or fine-tuned on screenshots from the specific game.
 
 ## Core projects
 
 - Roboflow RF-DETR: https://github.com/roboflow/rf-detr
 - Roboflow Trackers: https://github.com/roboflow/trackers
-
-Both support the local Python workflow used here.
