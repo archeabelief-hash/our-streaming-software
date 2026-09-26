@@ -1,6 +1,7 @@
 numpy
 opencv-python
 mss
+dxcam
 Pillow
 PySide6
 pywin32
