@@ -1,0 +1,9 @@
+numpy
+opencv-python
+mss
+Pillow
+PySide6
+pywin32
+supervision
+rfdetr
+trackers
